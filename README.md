@@ -13,7 +13,7 @@ Selects which sqlglot tests a patch can break, using maps built from the pinned 
 | class-level scalar setting (`WEEK_OFFSET = -1`) | tests that read that attribute on that class or a subclass (runtime trace) |
 | expression class setting (`arg_types`, names, flags) | tests that instantiate that expression class or a subclass (runtime trace) |
 | docstring text | nothing |
-| `tests/fixtures/...` file | tests that opened that file (including reads during class setup) |
+| `tests/fixtures/...` file | tests that opened that file; data read during class setup goes only to the tests in that class that name it (e.g. `tpc-h` data to the `tpch` tests) |
 | test file | the edited test functions |
 | removed import | tests running lines in that file that still use the name |
 | comment / docstring / new unused helper | nothing (unless the comment lands inside a multi-line string) |

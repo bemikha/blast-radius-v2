@@ -46,9 +46,18 @@ for f, ts in tr["files"].items():
     m = 0
     for t in ts:
         if t.startswith("CLASS:"):
+            # read during class setup: the tests of that class that refer to this data by name
             pre = t[6:] + "::"
-            for x, i in tid.items():
-                if x.startswith(pre): m |= 1 << i
+            members = [(x, i) for x, i in tid.items() if x.startswith(pre)]
+            parts = f.split("/")
+            names = {parts[-2].replace("-", "").replace("_", "").lower(),
+                     parts[-1].split(".")[0].replace("-", "").replace("_", "").lower()} - {"optimizer", "fixtures"}
+            def mentions(i):
+                src = idx["test_src"].get(i, "").replace("-", "").replace("_", "").lower()
+                return any(n and n in src for n in names)
+            hit = [i for x, i in members if mentions(i)]
+            for i in (hit or [i for _, i in members]):
+                m |= 1 << i
         elif t in tid: m |= 1 << tid[t]
     files[f] = m
 covsrc = {}
