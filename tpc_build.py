@@ -131,14 +131,33 @@ def main():
             expr = pickle.loads(pickle.dumps(parse_one(sql)))
             needed = sorted({t.name for t in sqlglot.find_tables(expr)})
             lines = set()
+            names = set()
+            import builtins
+            real_compile = builtins.compile
+
+            def recording_compile(*a, **k):
+                # the executor compiles each generated Python expression and evals it with
+                # ENV as its globals: record every global name the generated code can look up
+                code = real_compile(*a, **k)
+
+                def walk(co):
+                    names.update(co.co_names)
+                    for c in co.co_consts:
+                        if hasattr(c, "co_code"):
+                            walk(c)
+                if hasattr(code, "co_code"):
+                    walk(code)
+                return code
+            builtins.compile = recording_compile
             c0 = time.process_time()
             sys.settrace(tracer(lines))
             table = te.mp_execute(expr, args)
             sys.settrace(None)
+            builtins.compile = real_compile
             traced = time.process_time() - c0
             # untraced timing in the same (now warm) process is not cold; time a second,
             # clean run in a fresh child instead
-            return digest(pickle.loads(pickle.dumps(table))), needed, lines, traced
+            return digest(pickle.loads(pickle.dumps(table))), needed, lines, names
 
         def timed():
             expr = pickle.loads(pickle.dumps(parse_one(sql)))
@@ -156,11 +175,11 @@ def main():
     results = run_parallel(jobs, int(os.environ.get("TPC_BUILD_PROCS", "4")))
     queries = {}
     for i in sorted({j[0] for j in jobs}):
-        d, needed, lines, _ = results[(i, "trace")]
+        d, needed, lines, names = results[(i, "trace")]
         cpu, d2 = results[(i, "time")]
         if d != d2:
             raise SystemExit(f"query {i}: result not deterministic")
-        queries[i] = {"digest": d, "tables": needed, "lines": lines, "cpu": cpu}
+        queries[i] = {"digest": d, "tables": needed, "lines": lines, "cpu": cpu, "names": names}
         print(f"q{i}: cpu={cpu:.2f} lines={len(lines)}", file=sys.stderr)
 
     # determinism across processes: a third run of a few queries must match

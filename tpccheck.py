@@ -103,6 +103,17 @@ def affected_queries(patch_text, sources):
     queries = pin()["queries"]
     everything = sorted(queries)
     changed = _changed_old_lines(patch_text)
+    if set(sources) == {ENV_FILE} and all("names" in q for q in queries.values()):
+        keys = None
+        try:
+            with open(os.path.join(BASE, ENV_FILE), encoding="utf-8") as f:
+                keys = _env_entry_keys(f.read(), sources[ENV_FILE])
+        except (OSError, SyntaxError, ValueError):
+            keys = None
+        if keys:
+            lines = {(ENV_FILE[len(EXEC_PREFIX):], ln) for ln in changed.get(ENV_FILE, ())}
+            return sorted(i for i, q in queries.items() if q["names"] & keys or q["lines"] & lines), \
+                "ENV entries " + ",".join(sorted(keys))
     touched = {}  # executor-relative path -> set of (start, end) function spans
     for path, new_src in sources.items():
         try:
@@ -161,6 +172,54 @@ def affected_queries(patch_text, sources):
     if by_line is None:
         return by_function, "narrowed"
     return sorted(set(by_line) & set(by_function)), "narrowed to lines"
+
+
+ENV_FILE = "sqlglot/executor/env.py"
+
+
+def _env_entry_keys(old_src, new_src):
+    """Keys of the ENV table whose value expression the patch rewrote, or None.
+
+    The executor's generated code is evaluated with ENV as its globals, so a query can only
+    see a changed ENV value by looking that key up (tpc_build records every global name its
+    generated code can look up). Sound only if nothing else in the module changed, the keys
+    and their order are the same, and a rewritten value calls and names nothing new."""
+    def find(tree):
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                    and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "ENV" \
+                    and isinstance(node.value, ast.Dict):
+                return node.value
+        return None
+    old_t, new_t = ast.parse(old_src), ast.parse(new_src)
+    od, nd = find(old_t), find(new_t)
+    if od is None or nd is None or len(od.keys) != len(nd.keys):
+        return None
+    if not all(isinstance(k, ast.Constant) and isinstance(k.value, str) for k in od.keys + nd.keys):
+        return None
+    if [k.value for k in od.keys] != [k.value for k in nd.keys]:
+        return None
+    changed = set()
+    for k, vo, vn in zip(od.keys, od.values, nd.values):
+        if ast.dump(vo) == ast.dump(vn):
+            continue
+        names_o = {n.id for n in ast.walk(vo) if isinstance(n, ast.Name)}
+        names_n = {n.id for n in ast.walk(vn) if isinstance(n, ast.Name)}
+        calls_o = {ast.dump(n.func) for n in ast.walk(vo) if isinstance(n, ast.Call)}
+        calls_n = {ast.dump(n.func) for n in ast.walk(vn) if isinstance(n, ast.Call)}
+        attrs_o = {ast.dump(n) for n in ast.walk(vo) if isinstance(n, ast.Attribute)}
+        attrs_n = {ast.dump(n) for n in ast.walk(vn) if isinstance(n, ast.Attribute)}
+        if not (names_n <= names_o and calls_n <= calls_o and attrs_n <= attrs_o):
+            return None
+        if any(isinstance(n, (ast.NamedExpr, ast.Yield, ast.YieldFrom, ast.Await)) for n in ast.walk(vn)):
+            return None
+        changed.add(k.value)
+    # everything outside the ENV values must be identical
+    for d in (od, nd):
+        d.values = [ast.Constant(None) for _ in d.values]
+    if ast.dump(old_t) != ast.dump(new_t):
+        return None
+    return changed or None
 
 
 def _modified_old_lines(patch_text):
