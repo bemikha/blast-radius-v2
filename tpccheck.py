@@ -156,7 +156,107 @@ def affected_queries(patch_text, sources):
     # at import a `def` line only creates the function; its body running there is what counts
     if hits(pin()["import_lines"], body_only=True):
         return everything, "changed function runs at import"
-    return sorted(i for i, q in queries.items() if hits(q["lines"])), "narrowed"
+    by_function = sorted(i for i, q in queries.items() if hits(q["lines"]))
+    by_line = _line_narrowing(patch_text, sources, queries)
+    if by_line is None:
+        return by_function, "narrowed"
+    return sorted(set(by_line) & set(by_function)), "narrowed to lines"
+
+
+def _modified_old_lines(patch_text):
+    """{path: old line numbers} when every hunk only rewrites lines in place (as many `-` as
+    `+` lines, in pairs), else None: insertions and deletions keep function-level narrowing."""
+    import re
+    out, cur, old, minus, plus = {}, None, 0, 0, 0
+    for line in patch_text.split("\n") + ["@@ -0 +0 @@"]:
+        if line.startswith("+++ "):
+            p = line[4:].strip().split("\t")[0]
+            cur = p[2:] if p.startswith("b/") else p
+            out.setdefault(cur, set())
+            continue
+        if line.startswith("--- ") or line.startswith("diff --git"):
+            continue
+        m = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+        if m:
+            if minus != plus:
+                return None
+            old, minus, plus = int(m.group(1)), 0, 0
+            continue
+        if cur is None:
+            continue
+        if line.startswith("-"):
+            out[cur].add(old)
+            old += 1
+            minus += 1
+        elif line.startswith("+"):
+            plus += 1
+        elif line.startswith(" ") or line == "":
+            if minus != plus:  # a run of `-` lines must be matched by as many `+` lines
+                return None
+            old += 1
+    return out
+
+
+def _code_shapes(src):
+    """(name, first line) -> what a body edit must not change for line narrowing to be sound:
+    local / cell / free variable names and the flags (generator, coroutine, ...)."""
+    out = {}
+
+    def walk(co):
+        out[(co.co_name, co.co_firstlineno)] = (co.co_varnames, co.co_cellvars, co.co_freevars,
+                                                co.co_flags, co.co_argcount, co.co_kwonlyargcount)
+        for c in co.co_consts:
+            if hasattr(c, "co_code"):
+                walk(c)
+    walk(compile(src, "<check>", "exec"))
+    return out
+
+
+def _line_narrowing(patch_text, sources, queries):
+    """Queries that executed a rewritten line, or None when line-level narrowing is not sound.
+
+    A query that never executed any rewritten line runs, after the patch, exactly the code it
+    ran before, as long as the rewrite changes no function's compiled shape (a new local name
+    or a `yield` changes the whole function even where the line itself never runs)."""
+    mod = _modified_old_lines(patch_text)
+    if mod is None:
+        return None
+    spans = {}  # executor-relative path -> [(first, last)] line spans that run the rewrite
+    for path, new_src in sources.items():
+        try:
+            with open(os.path.join(BASE, path), encoding="utf-8") as f:
+                old_src = f.read()
+            if _code_shapes(old_src) != _code_shapes(new_src):
+                return None
+            tree = ast.parse(old_src)
+        except (OSError, SyntaxError, ValueError):
+            return None
+        stmts = [n for n in ast.walk(tree) if isinstance(n, ast.stmt)]
+        rel = path[len(EXEC_PREFIX):]
+        spans[rel] = []
+        if not mod.get(path):
+            return None
+        for ln in mod[path]:
+            inner = [s for s in stmts if s.lineno <= ln <= s.end_lineno]
+            if not inner:
+                return None
+            s = max(inner, key=lambda s: (s.lineno, -s.end_lineno))  # innermost
+            body = getattr(s, "body", None)
+            if body and isinstance(body, list):
+                header_end = max(s.lineno, body[0].lineno - 1)
+                if ln > header_end:
+                    return None  # an else/finally line, a comment between blocks, ...
+                spans[rel].append((s.lineno, header_end))
+            else:
+                spans[rel].append((s.lineno, s.end_lineno))
+
+    def ran(lines):
+        for rel, ln in lines:
+            for a, b in spans.get(rel, ()):
+                if a <= ln <= b:
+                    return True
+        return False
+    return [i for i, q in queries.items() if ran(q["lines"])]
 
 
 def estimate_cpu(indices):
