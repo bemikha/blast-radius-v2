@@ -15,14 +15,6 @@ MAX_EST = float(os.environ.get("BR_MAX_EST", "0.6"))        # never check above 
 WALL_BUDGET = 45.0         # stop checking after this much wall time (3 min limit, 4.5 in final)
 CPU_BUDGET = 12.0          # ... or after this much CPU of our own
 
-# --- TPC-DS check for executor-only patches (see tpccheck.py) ------------------------------
-TPC = os.environ.get("BR_TPC", "1") == "1"
-TPC_P_PASS = float(os.environ.get("BR_TPC_P_PASS", "0.5"))
-TPC_CPU_FACTOR = float(os.environ.get("BR_TPC_CPU_FACTOR", "1.7"))
-TPC_FAIL_SHARE = 0.3       # a differing result stops the run early
-TPC_WALL_BUDGET = 100.0    # never start a TPC-DS check after this much wall time
-TPC_CPU_BUDGET = 45.0      # ... or once this much CPU is spent
-
 
 def split(items, k):
     ws = [[] for _ in range(k)]; loads = [0] * k
@@ -71,33 +63,6 @@ def plan_check(text, sel, workers, by_id, by_num):
     return sources, nodeids, est
 
 
-def maybe_drop_tpcds(cid, text, sel, workers, by_id, by_num):
-    """-> sel without test_execute_tpcds if an in-container rerun proves it passes, else sel."""
-    import check as C
-    import tpccheck as T
-    if T.TPCDS not in sel or not T.available():
-        return sel
-    if time.monotonic() - wall0 > TPC_WALL_BUDGET or own_cpu() > TPC_CPU_BUDGET:
-        return sel
-    sources = C.apply_patch(text)
-    if not T.executor_only(sources):
-        return sel
-    indices, why = T.affected_queries(text, sources)
-    est = T.estimate_cpu(indices)
-    rest = [t for t in sel if t != T.TPCDS]
-    after = best_split([(round(by_id[t]["seconds"] * 1000), by_id[t]["number"]) for t in rest if t in by_id])
-    saving = static_cost(workers, by_num) - static_cost(after, by_num)
-    expected_cpu = TPC_CPU_FACTOR * est * (TPC_P_PASS + (1 - TPC_P_PASS) * TPC_FAIL_SHARE)
-    if TPC_P_PASS * saving <= expected_cpu:
-        print(f"{cid}: tpcds skip ({why}, {len(indices)} queries, est={est:.1f} saving={saving:.1f})", file=sys.stderr)
-        return sel
-    c0 = own_cpu()
-    verdict, detail = T.run(sources, indices, wall_timeout=max(10.0, 4 * est))
-    print(f"{cid}: tpcds {verdict} ({why}, {len(indices)} queries) est={est:.1f} cpu={own_cpu() - c0:.1f} "
-          f"saving={saving:.1f} {str(detail)[:60]}", file=sys.stderr)
-    return rest if verdict == "pass" else sel
-
-
 def run_checks(todo, answers, by_num):
     import check as C
     here = os.path.dirname(os.path.abspath(__file__))
@@ -143,15 +108,6 @@ def main():
             sel = [t["id"] for t in tests]
         items = [(round(by_id[t]["seconds"] * 1000), by_id[t]["number"]) for t in sel if t in by_id]
         workers = best_split(items)
-        if workers and TPC:
-            try:
-                sel2 = maybe_drop_tpcds(cid, text, sel, workers, by_id, by_num)
-                if sel2 is not sel:
-                    sel = sel2
-                    workers = best_split([(round(by_id[t]["seconds"] * 1000), by_id[t]["number"])
-                                          for t in sel if t in by_id])
-            except Exception as e:  # any doubt: keep the static selection
-                print(f"{cid}: tpcds error {e!r}", file=sys.stderr)
         answers[cid] = workers
         if workers and CHECK:
             try:
