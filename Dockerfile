@@ -15,7 +15,11 @@ RUN python /tmp/fetch_sqlglot.py /opt/sqlglot \
  && chmod -R a+rX /opt/sqlglot
 
 WORKDIR /app
-COPY select_tests.py main.py check.py index.pkl.gz cpu_est.json warm_modules.json /app/
+COPY select_tests.py main.py check.py tpccheck.py tpc_build.py index.pkl.gz cpu_est.json warm_modules.json /app/
+# Pinned TPC-DS executor results, CPU times and per-query executor coverage, made in this exact
+# environment. If this step fails the file is absent and the TPC-DS check simply stays off.
+RUN cd /opt/sqlglot && (SKIP_INTEGRATION=0 python /app/tpc_build.py /opt/sqlglot /app/tpc_pinned.pkl 2>/tmp/tpc_build.log \
+    || rm -f /app/tpc_pinned.pkl); tail -1 /tmp/tpc_build.log
 RUN python -m compileall -q /app && chmod -R a+rX /app
 ENV PYTHONDONTWRITEBYTECODE=1 BR_SQLGLOT=/opt/sqlglot SKIP_INTEGRATION=0
 CMD ["python", "/app/main.py"]
